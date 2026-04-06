@@ -3,7 +3,7 @@
  * Plugin Name: Strong Anchor Lightweight SEO
  * Plugin URI: https://github.com/stronganchor/lightweight-seo
  * Description: Lightweight SEO tools for LocalBusiness/Organization JSON-LD and simple search snippet editing.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Update URI: https://github.com/stronganchor/lightweight-seo
  * Author: Strong Anchor Tech
  * Author URI: https://stronganchortech.com
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'SAT_LIGHTWEIGHT_SEO_VERSION', '1.0.1' );
+define( 'SAT_LIGHTWEIGHT_SEO_VERSION', '1.0.2' );
 define( 'SAT_LIGHTWEIGHT_SEO_FILE', __FILE__ );
 define( 'SAT_LIGHTWEIGHT_SEO_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -440,26 +440,35 @@ if ( ! class_exists( 'SAT_Lightweight_SEO' ) ) {
         private function scan_site_for_suggestions() {
             $defaults = $this->get_defaults();
             $sources  = array();
+            $emails   = array();
+            $home_url = home_url( '/' );
 
             $sources[] = array(
                 'business_name'   => get_bloginfo( 'name' ),
                 'description'     => get_bloginfo( 'description' ),
-                'url'             => home_url( '/' ),
-                'email'           => get_option( 'admin_email' ),
+                'url'             => $home_url,
                 'logo'            => $this->get_site_logo_url(),
                 'schema_type'     => 'ProfessionalService',
                 'address_country' => $this->guess_country_from_locale(),
             );
 
-            $home_analysis = $this->analyze_rendered_url( home_url( '/' ) );
+            $home_analysis = $this->analyze_rendered_url( $home_url );
             if ( ! empty( $home_analysis ) ) {
                 $sources[] = $home_analysis;
+                $emails[]  = array(
+                    'url'   => $home_url,
+                    'email' => isset( $home_analysis['email'] ) ? $home_analysis['email'] : '',
+                );
             }
 
             foreach ( $this->find_priority_pages() as $page_url ) {
                 $page_analysis = $this->analyze_rendered_url( $page_url );
                 if ( ! empty( $page_analysis ) ) {
                     $sources[] = $page_analysis;
+                    $emails[]  = array(
+                        'url'   => $page_url,
+                        'email' => isset( $page_analysis['email'] ) ? $page_analysis['email'] : '',
+                    );
                 }
             }
 
@@ -486,6 +495,11 @@ if ( ! class_exists( 'SAT_Lightweight_SEO' ) ) {
 
             if ( empty( $merged['url'] ) ) {
                 $merged['url'] = home_url( '/' );
+            }
+
+            $best_email = $this->choose_best_public_email( $emails );
+            if ( '' !== $best_email ) {
+                $merged['email'] = $best_email;
             }
 
             return $merged;
@@ -554,7 +568,7 @@ if ( ! class_exists( 'SAT_Lightweight_SEO' ) ) {
                 array(
                     'timeout'     => 12,
                     'redirection' => 3,
-                    'user-agent'  => 'StrongAnchor-Lightweight-SEO/1.0; ' . home_url( '/' ),
+                    'user-agent'  => 'StrongAnchor-Lightweight-SEO/' . SAT_LIGHTWEIGHT_SEO_VERSION . '; ' . home_url( '/' ),
                 )
             );
 
@@ -991,13 +1005,14 @@ if ( ! class_exists( 'SAT_Lightweight_SEO' ) ) {
          * @return array<int,string>
          */
         private function extract_emails( $html ) {
-            $emails = array();
+            $emails    = array();
+            $site_host = $this->get_site_host();
 
             if ( preg_match_all( '/mailto:([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})/i', $html, $matches ) ) {
                 foreach ( $matches[1] as $email ) {
                     $email = sanitize_email( $email );
                     if ( $email ) {
-                        $emails[] = $email;
+                        $this->store_email_candidate_score( $emails, $email, $this->score_email_candidate( $email, true, $site_host ) );
                     }
                 }
             }
@@ -1006,12 +1021,217 @@ if ( ! class_exists( 'SAT_Lightweight_SEO' ) ) {
                 foreach ( $matches[0] as $email ) {
                     $email = sanitize_email( $email );
                     if ( $email ) {
-                        $emails[] = $email;
+                        $this->store_email_candidate_score( $emails, $email, $this->score_email_candidate( $email, false, $site_host ) );
                     }
                 }
             }
 
-            return array_values( array_unique( $emails ) );
+            if ( empty( $emails ) ) {
+                return array();
+            }
+
+            arsort( $emails, SORT_NUMERIC );
+
+            return array_keys( $emails );
+        }
+
+        /**
+         * Pick the best public-facing email suggestion from analyzed pages.
+         *
+         * @param array<int,array<string,string>> $sources Page email sources.
+         * @return string
+         */
+        private function choose_best_public_email( $sources ) {
+            $site_host  = $this->get_site_host();
+            $best_email = '';
+            $best_score = PHP_INT_MIN;
+
+            foreach ( $sources as $source ) {
+                $email = isset( $source['email'] ) ? sanitize_email( $source['email'] ) : '';
+                if ( '' === $email ) {
+                    continue;
+                }
+
+                $url   = isset( $source['url'] ) ? (string) $source['url'] : '';
+                $score = $this->score_email_candidate( $email, false, $site_host ) + $this->get_email_page_bonus( $url );
+
+                if ( $score > $best_score ) {
+                    $best_score = $score;
+                    $best_email = $email;
+                }
+            }
+
+            if ( '' !== $best_email && $best_score >= 0 ) {
+                return $best_email;
+            }
+
+            return $this->get_public_admin_email_fallback();
+        }
+
+        /**
+         * Store the best score for an email candidate.
+         *
+         * @param array<string,int> $emails Candidate score map.
+         * @param string            $email  Email candidate.
+         * @param int               $score  Candidate score.
+         * @return void
+         */
+        private function store_email_candidate_score( &$emails, $email, $score ) {
+            if ( ! isset( $emails[ $email ] ) || $score > $emails[ $email ] ) {
+                $emails[ $email ] = (int) $score;
+            }
+        }
+
+        /**
+         * Score an email candidate for public-facing use.
+         *
+         * @param string $email     Email candidate.
+         * @param bool   $is_mailto Whether the email came from a mailto link.
+         * @param string $site_host Preferred site host.
+         * @return int
+         */
+        private function score_email_candidate( $email, $is_mailto = false, $site_host = '' ) {
+            $email = sanitize_email( $email );
+            if ( '' === $email || false === strpos( $email, '@' ) ) {
+                return PHP_INT_MIN;
+            }
+
+            list( $local_part, $domain ) = array_pad( explode( '@', strtolower( $email ), 2 ), 2, '' );
+
+            if ( '' === $local_part || '' === $domain ) {
+                return PHP_INT_MIN;
+            }
+
+            $score = 0;
+            $label = $this->normalize_email_label( $local_part );
+
+            if ( $is_mailto ) {
+                $score += 15;
+            }
+
+            if ( $this->is_site_email_domain( $domain, $site_host ) ) {
+                $score += 20;
+            }
+
+            foreach ( array( 'info', 'contact', 'hello', 'support', 'help', 'team', 'office', 'sales', 'service', 'bookings', 'booking', 'appointments', 'connect', 'enquiries', 'inquiries' ) as $needle ) {
+                if ( preg_match( '/\b' . preg_quote( $needle, '/' ) . '\b/', $label ) ) {
+                    $score += 40;
+                    break;
+                }
+            }
+
+            foreach ( array( 'noreply', 'no reply', 'do not reply', 'donotreply' ) as $needle ) {
+                if ( false !== strpos( $label, $needle ) ) {
+                    $score -= 100;
+                    break;
+                }
+            }
+
+            foreach ( array( 'admin', 'administrator', 'webmaster', 'wordpress', 'root', 'postmaster', 'system', 'hostmaster' ) as $needle ) {
+                if ( preg_match( '/\b' . preg_quote( $needle, '/' ) . '\b/', $label ) ) {
+                    $score -= 20;
+                    break;
+                }
+            }
+
+            if ( preg_match( '/(^|\.)example\.(com|org|net)$/', $domain ) || 'localhost' === $domain || 'users.noreply.github.com' === $domain ) {
+                $score -= 100;
+            }
+
+            return $score;
+        }
+
+        /**
+         * Normalize an email label for keyword matching.
+         *
+         * @param string $value Value.
+         * @return string
+         */
+        private function normalize_email_label( $value ) {
+            $value = strtolower( (string) $value );
+            $value = preg_replace( '/[^a-z0-9]+/', ' ', $value );
+
+            return trim( (string) $value );
+        }
+
+        /**
+         * Get a small page-based bonus for likely contact pages.
+         *
+         * @param string $url URL.
+         * @return int
+         */
+        private function get_email_page_bonus( $url ) {
+            $path = wp_parse_url( $url, PHP_URL_PATH );
+            if ( ! is_string( $path ) || '' === $path ) {
+                return 0;
+            }
+
+            $haystack = strtolower( str_replace( array( '-', '_', '/' ), ' ', $path ) );
+
+            foreach ( array( 'contact', 'support', 'connect', 'get in touch' ) as $needle ) {
+                if ( false !== strpos( $haystack, $needle ) ) {
+                    return 20;
+                }
+            }
+
+            foreach ( array( 'about', 'location', 'locations', 'reach' ) as $needle ) {
+                if ( false !== strpos( $haystack, $needle ) ) {
+                    return 10;
+                }
+            }
+
+            return 0;
+        }
+
+        /**
+         * Get a last-resort admin email only when it already looks public-facing.
+         *
+         * @return string
+         */
+        private function get_public_admin_email_fallback() {
+            $email = sanitize_email( get_option( 'admin_email' ) );
+            if ( '' === $email ) {
+                return '';
+            }
+
+            if ( $this->score_email_candidate( $email, false, $this->get_site_host() ) < 25 ) {
+                return '';
+            }
+
+            return $email;
+        }
+
+        /**
+         * Get the normalized site host for email matching.
+         *
+         * @return string
+         */
+        private function get_site_host() {
+            $host = wp_parse_url( home_url( '/' ), PHP_URL_HOST );
+
+            return is_string( $host ) ? strtolower( $host ) : '';
+        }
+
+        /**
+         * Determine whether an email domain belongs to the site.
+         *
+         * @param string $domain    Email domain.
+         * @param string $site_host Site host.
+         * @return bool
+         */
+        private function is_site_email_domain( $domain, $site_host ) {
+            $domain    = strtolower( trim( (string) $domain ) );
+            $site_host = strtolower( trim( (string) $site_host ) );
+
+            if ( '' === $domain || '' === $site_host ) {
+                return false;
+            }
+
+            if ( $domain === $site_host || '.' . $site_host === substr( $domain, -1 - strlen( $site_host ) ) ) {
+                return true;
+            }
+
+            return '.' . $domain === substr( $site_host, -1 - strlen( $domain ) );
         }
 
         /**
