@@ -1,8 +1,10 @@
 <?php
 /**
  * Plugin Name: Strong Anchor Lightweight SEO
+ * Plugin URI: https://github.com/stronganchor/lightweight-seo
  * Description: Lightweight SEO tools for LocalBusiness/Organization JSON-LD and simple search snippet editing.
- * Version: 1.0.0
+ * Version: 1.0.1
+ * Update URI: https://github.com/stronganchor/lightweight-seo
  * Author: Strong Anchor Tech
  * Author URI: https://stronganchortech.com
  * License: GPL2+
@@ -11,6 +13,74 @@
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
+
+define( 'SAT_LIGHTWEIGHT_SEO_VERSION', '1.0.1' );
+define( 'SAT_LIGHTWEIGHT_SEO_FILE', __FILE__ );
+define( 'SAT_LIGHTWEIGHT_SEO_DIR', plugin_dir_path( __FILE__ ) );
+
+/**
+ * Get the update branch for the bundled update checker.
+ *
+ * @return string
+ */
+function sat_lwseo_get_update_branch() {
+    $branch = 'main';
+
+    if ( defined( 'SAT_LIGHTWEIGHT_SEO_UPDATE_BRANCH' ) && is_string( SAT_LIGHTWEIGHT_SEO_UPDATE_BRANCH ) ) {
+        $override = trim( SAT_LIGHTWEIGHT_SEO_UPDATE_BRANCH );
+        if ( '' !== $override ) {
+            $branch = $override;
+        }
+    }
+
+    return (string) apply_filters( 'sat_lwseo_update_branch', $branch );
+}
+
+/**
+ * Load the bundled GitHub update checker when available.
+ *
+ * @return void
+ */
+function sat_lwseo_bootstrap_update_checker() {
+    $checker_file = SAT_LIGHTWEIGHT_SEO_DIR . 'plugin-update-checker/plugin-update-checker.php';
+    if ( ! file_exists( $checker_file ) ) {
+        return;
+    }
+
+    require_once $checker_file;
+
+    if ( ! class_exists( '\YahnisElsts\PluginUpdateChecker\v5\PucFactory' ) ) {
+        return;
+    }
+
+    $repo_url = (string) apply_filters(
+        'sat_lwseo_update_repository',
+        'https://github.com/stronganchor/lightweight-seo'
+    );
+    $slug     = dirname( plugin_basename( SAT_LIGHTWEIGHT_SEO_FILE ) );
+
+    $update_checker = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+        $repo_url,
+        SAT_LIGHTWEIGHT_SEO_FILE,
+        $slug
+    );
+
+    $update_checker->setBranch( sat_lwseo_get_update_branch() );
+
+    foreach ( array( 'SAT_LIGHTWEIGHT_SEO_GITHUB_TOKEN', 'STRONGANCHOR_GITHUB_TOKEN', 'ANCHOR_GITHUB_TOKEN' ) as $constant_name ) {
+        if ( ! defined( $constant_name ) || ! is_string( constant( $constant_name ) ) ) {
+            continue;
+        }
+
+        $token = trim( (string) constant( $constant_name ) );
+        if ( '' !== $token ) {
+            $update_checker->setAuthentication( $token );
+            break;
+        }
+    }
+}
+
+sat_lwseo_bootstrap_update_checker();
 
 if ( ! class_exists( 'SAT_Lightweight_SEO' ) ) {
     class SAT_Lightweight_SEO {
